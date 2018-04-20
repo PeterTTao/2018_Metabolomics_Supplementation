@@ -1,0 +1,592 @@
+---
+title: "20180110_Boxplot_Heatmap_Generator"
+author: "Soumaya Zlitni" and "Peter Tao"
+date: '2018-01-10'
+output: word_document
+---
+
+## Summary
+
+This is the analysis of the extracted ACID/IPRP/Pathway intermediates data for various experiments.
+This program is comprehensive and can be applied to all samples from the project. Paramaters that need to be changed can be found in Parts 2 and 3.
+
+As a sample, the LYS Mutant (RCY308, RCY256 [lys2], lys2-pHLUM, HO-pHLUM, lys1-pHLUM, lys4-pHLUM, lys9-pHLUM, lys12-pHLUM, and lys20/21) information is supplied as parameters.
+
+## Part 1: Load required packages and set the working directory.
+```{r, echo=F}
+
+
+### If the packages have not been previously installed, please run the following line of code:
+# install.packages(c("knitr","gtools","gplots","dplyr","ggplot2","tidyr","magrittr","cowplot","gridExtra","rmarkdown","scales"))
+
+
+require(knitr)
+require(gtools)
+require(gplots)
+require(dplyr)
+require(ggplot2)
+require(tidyr)
+require(magrittr)
+require(cowplot)
+require(gridExtra)
+require(rmarkdown)
+require(scales)
+
+# #Make sure to select the proper directory for the working directory:
+setwd("~/Dropbox/201710_SC_Supplementation_project/20180226_Lysine_Mutant_Analysis")
+options(stringsAsFactors = F)
+
+```
+
+A working directory has been set, and the required packages have been loaded.
+
+
+## Part 2: Specify parameters for this program.
+
+This section should be changed depending on the experiment. 
+
+```{r, echo=FALSE}
+
+#Enter which experiment you are working with.
+experiment<-"Lys_Mutants"
+#Specify today's date
+datePlot <- "20180414"
+#IPRP or ACID
+lcMethod <- "ACID"
+#IPRP_Stds or Pathway_Intermediates or ACID_Stds
+#Wording is especially important
+#"Pathway_Intermediates" will use Median-Centering, otherwise it will divide by reference
+features <- "ACID_Stds"
+#AUX or SUPP?
+analysis <- "AUX"
+#Specify which is the control strain by which to divide all integrals by.
+#This is usually WT_RCY308
+control.strain <- "HO_Control"
+
+compiled.label <- paste0(datePlot,"_SC_",experiment,"_",features,"_",analysis)
+
+```
+
+## Part 3: Select and merge input files.
+
+There are two input .csv files: integrals and Sample.info.
+
+* The first integrals file contains the raw values for the integrated intensities for the metabolites across the samples that were analyzed. The EIC were extracted using ChromXtractorPro followed by manual integrations.
+The integral output is arranged as a long table with the following column headings: sampleName, featureName, featureClass, mzCenter, rtCenter, sampleClass, integratedIntensity
+    + Note that for peaks that were not integrated (judged as not present), the value for integratedIntensity is 0. As a first pass, all rows with integral = 0 are removed to avoid any glitches later.
+
+* The second .csv is the Sample.info file. This user-created file is made to provide the metadata for what each sample is. The file is set up as a tidy long table. This file needs to contain a column named sampleName (the PTMET names) as this will be used to merge the integrals with the metadata.
+
+* Modify the Sample.info column headings based on what the metadata for the experiment are. For most of the SUPP experiments is Strain, Supp, Rep
+
+Note that both of the input files (integrals and sample.info) must have the column sampleName containing the PTMET file names.
+
+```{r}
+
+# upload the integral output
+integrals <- read.csv(file.choose(), header = T,stringsAsFactors=F)
+
+#This creates a subset of integrals that we can manipulate
+subset.integrals<-integrals
+
+### Optional Code: This is for analyzing multiple experiments at once where zeroing differs
+zero.index<-unlist(lapply(unique(integrals$featureName[which(integrals$integratedIntensity==0)]),grep,integrals$featureName))
+if(length(zero.index)!=0)
+{
+
+  subset.integrals<-integrals[-zero.index,]
+}
+
+###
+
+# remove the rows for the metabolites for which the integral = 0
+subset.tbl <- subset(subset.integrals, integratedIntensity != 0)
+
+
+# upload the sample info data frame csv
+Sample.csv <- read.csv(file.choose(), header=TRUE, stringsAsFactors=FALSE)
+Sample.info <- Sample.csv %>%
+  mutate(sample = paste0(strainName, "_", condition,"_", "_", rep),
+         sampleAvg = paste0(strainName, "_", condition))
+
+long.tbl <- merge(subset.tbl, Sample.info, by = "sampleName") %>%
+  mutate(UID = paste0(sampleName,"_",featureName,"_",featureClass))
+
+#This removes duplicates
+long.tbl<-long.tbl[!duplicated(long.tbl$UID),]
+
+
+```
+
+## Part 4: Prepare the data for plotting.
+The following code aims to do 4 things:
+1- Separate the MET and REF dataframes for the levels of the metabolite and labeled reference in the samples, respectively
+2- Calculate ratios and make a Ratio table
+3- Log2 transform the ratios
+4- Add the ratios column to the tbl.met dataframe (after removing the integratedIntensity and featureClass columns). This makes tbl.ratios
+If there is an error and ratios cannot be calculated for any feature or sample, an error message will occur.
+In other words, the if() statement verifies that each MET is normalized to its corresponding REF.
+```{r}
+
+tbl.met <- filter(long.tbl, featureClass == "MET") %>%
+  arrange(sampleName, featureName)
+tbl.ref <- filter(long.tbl, featureClass == "REF") %>%
+  arrange(sampleName, featureName)
+
+if (identical(tbl.met$featureName, tbl.ref$featureName) &&
+    identical(tbl.met$sampleName, tbl.ref$sampleName)) {
+  ratios <- tbl.met$integratedIntensity/tbl.ref$integratedIntensity
+  tbl.ratios <- data.frame(subset(tbl.met, select = -c(integratedIntensity, featureClass)), Ratios = ratios)
+ } else {
+  print("Can't calculate ratios")
+}
+
+#This accounts for pathway intermediates, where REF is not present
+if(features=="Pathway_Intermediates")
+{
+  # Starting with tbl.met which only includes the integrated intensisities for the MET masses
+
+  # log2 transfrom the integrated intensity for the MET
+  log2.tbl.met <- tbl.met %>%
+    filter(sampleClass != "Filter", sampleClass != "Media") %>%
+    mutate(log2.integral = log2(integratedIntensity))
+  
+  # Calculate the median per metabolite
+  median.met <- log2.tbl.met %>%
+    group_by(featureName) %>%
+    summarise(metMedian = median(log2.integral, na.rm = TRUE))
+  median.met<-data.frame(featureName=unlist(median.met[,1]),metMedian=unlist(median.met[,2]))
+  
+  # Median center the data
+  centered.met <- log2.tbl.met %>%
+    arrange(sample, featureName) %>%
+    mutate(centered.log2.integral = log2.integral - median.met$metMedian) %>%
+    select(featureName, mzCenter, rtCenter, sample, sampleName, sampleClass, condition, sampleAvg, centered.log2.integral)
+
+  # To be used to keep the Sample order in the heatmaps  
+  allsampleLevels <- mixedsort(levels(factor(centered.met$sample)))
+  allsampleAvgLevels <- mixedsort(levels(factor(centered.met$sampleAvg)))
+  
+  print("Median-Centered Boxplot")
+}
+
+```
+
+## Part 5: Generate boxplots.
+* For each metabolite in the dataset, prepare box plots comparing the ratios (MET/REF) across the different treatments. Use the tbl.ratios dataframe to make the plots to display the replicates in the plots.
+* The same code can be used to plot the log2-transformed data, if needed.
+
+### This boxplot for IPRP and ACID
+```{r, fig.width = 5, fig.height = 3, echo = TRUE}
+
+# Function to calculate the limits on the y-axis of the boxplot
+# If the y-axis includes negative values then I want 0 to be centered on the y-axis
+# If not then the limits start at 0 to max*1.2 (for some buffer at the top of the y-axis)
+bp.limits <- function(x) {
+  if(any(boxplot.df$Ratios < 0)) {
+  a <- abs(max(boxplot.df$Ratios))
+  b <- abs(min(boxplot.df$Ratios))
+  maxVal <- max(a, b)
+  return(c(-maxVal, + maxVal))
+} else {
+  return(c(0, max(boxplot.df$Ratios * 1.2)))
+}
+}
+
+# Define a list to save the boxplots in for the final pdf of boxplots
+bp.list <- list()
+
+for(i in seq_along(unique(tbl.ratios$featureName))) {
+  boxplot.df <- tbl.ratios %>%
+    filter(featureName == unique(tbl.ratios$featureName)[i]) %>%
+    filter(sampleClass != "Filter ctrl", sampleClass !="Media ctrl")
+  
+  ggplot(boxplot.df, aes(x = factor(sampleClass), y = Ratios, fill = sampleClass)) +
+  geom_boxplot(aes(group = sampleClass)) +
+  geom_point(size = 2) +
+  coord_cartesian(ylim = bp.limits(.)) +
+  labs(title = paste(unique(boxplot.df$featureName), ": m/z ", 
+                     unique(boxplot.df$mzCenter), "; Rt", unique(boxplot.df$rtCenter)),
+       x = "", y = "Normalized Ratio (Met/Ref)") +
+  theme_bw(base_size = 10) +
+  theme(panel.grid = element_blank()) +
+  theme(legend.position = "none") +
+  theme(legend.title = element_blank()) +
+  theme(axis.title = element_text(size = 10)) +
+  theme(legend.text = element_text(size = 10, vjust = 0)) +
+  theme(axis.text.y = element_text(size = 10, vjust = 0.5, hjust = 0.5, colour = "black")) +
+  theme(axis.text.x = element_text(size = 8, vjust = 1, hjust = 0, angle = -45 , colour = "black"))
+  theme(strip.text.x = element_text(colour = "black", size = 8)) +
+  theme(plot.title = element_text(size = 10, face = "bold"))
+  
+  bp <- last_plot()
+  bp.list <- append(bp.list, list(bp))
+}
+
+# Save the boxplots in one multipage pdf
+pdf(file = paste0("Boxplots/",compiled.label, "_boxplots.pdf"), width = 17, height = 13)
+marrangeGrob(bp.list, nrow = 4, ncol = 3)
+dev.off()
+
+```
+
+### This boxplot for Pathway_Intermediates
+```{r, fig.width = 5, fig.height = 3, echo = TRUE}
+
+# Function to calculate the limits on the y-axis of the boxplot
+# If the y-axis includes negative values then I want 0 to be centered on the y-axis
+# If not then the limits start at 0 to max*1.2 (for some buffer at the top of the y-axis)
+bp.limits <- function(x) {
+  if(any(boxplot.df$centered.log2.integral < 0)) {
+  a <- abs(max(boxplot.df$centered.log2.integral))
+  b <- abs(min(boxplot.df$centered.log2.integral))
+  maxVal <- max(a, b)
+  return(c(-maxVal, + maxVal))
+} else {
+  return(c(0, max(boxplot.df$centered.log2.integral * 1.2)))
+}
+}
+
+# Define a list to save the boxplots in for the final pdf of boxplots
+bp.list <- list()
+
+for(i in seq_along(unique(centered.met$featureName))) {
+  boxplot.df <- centered.met %>%
+    filter(featureName == unique(centered.met$featureName)[i]) %>%
+    filter(sampleClass != "Filter ctrl", sampleClass !="Media ctrl")
+  
+  ggplot(boxplot.df, aes(x = factor(sampleClass), y = centered.log2.integral, fill = sampleClass)) +
+  geom_boxplot(aes(group = sampleClass)) +
+  geom_point(size = 2) +
+  coord_cartesian(ylim = bp.limits(.)) +
+  labs(title = paste(unique(boxplot.df$featureName), ": m/z ", 
+                     unique(boxplot.df$mzCenter), "; Rt", unique(boxplot.df$rtCenter)),
+       x = "", y = "Median-Centered Integrals") +
+  theme_bw(base_size = 10) +
+  theme(panel.grid = element_blank()) +
+  theme(legend.position = "none") +
+  theme(legend.title = element_blank()) +
+  theme(axis.title = element_text(size = 10)) +
+  theme(legend.text = element_text(size = 10, vjust = 0)) +
+  theme(axis.text.y = element_text(size = 10, vjust = 0.5, hjust = 0.5, colour = "black")) +
+  theme(axis.text.x = element_text(size = 8, vjust = 1, hjust = 0, angle = -45 , colour = "black"))
+  theme(strip.text.x = element_text(colour = "black", size = 8)) +
+  theme(plot.title = element_text(size = 10, face = "bold"))
+  
+  bp <- last_plot()
+  bp.list <- append(bp.list, list(bp))
+}
+
+# Save the boxplots in one multipage pdf
+pdf(file = paste0("Boxplots/",compiled.label, "_boxplots.pdf"), width = 17, height = 13)
+marrangeGrob(bp.list, nrow = 4, ncol = 3)
+dev.off()
+
+```
+
+## Part 6: Prepare data for heatmap generation.
+
+*Note: It is very important that the order of the features in the avg.ctrl matches that of the metabolites in the treated dataframe. The features in the control dataframe are ordered alphanumerically. Hence, the features are arranged by featureName in the treated dataframe before normalizing the data to the control. 
+
+This particular region of code performs 4 tasks:
+1- Take the control data and average it per metabolite
+* The ctrl here is the control specified in Part 2 (control.strain <- )
+2- Take the rest of the data and normalize to the control average (create this column in treated)
+3- log2 transform this data (and create a column for it in treated)
+4- The log2-transformed data will be used next in the heatmaps.
+
+```{r}
+
+# Create a list of the averages of the untreated control
+control <- tbl.ratios %>%
+  filter(sampleClass == control.strain) %>%
+  group_by(featureName) %>%
+  summarise(CtrlAvg = mean(Ratios, na.rm = TRUE)) %>%
+  arrange(featureName)
+
+# Normalize all the data to the average of the untreated control
+tbl.norm.ratios <- tbl.ratios %>%
+  filter(sampleClass != control.strain) %>%
+  arrange(sampleName, featureName) %>%    # important step to ensure that the order matches that in the control
+  mutate(Norm.ratios = Ratios/control$CtrlAvg) %>%
+  mutate(log2.Norm.ratios = log2(Norm.ratios))
+
+```
+
+## This 
+Code for median-centering data before plotting heatmaps.
+
+Median centering:
+1- log2-transform the integrated intensity data
+2- Calculate the median of the log2-data per metabolite across the entire dataset (controls & test samples)
+3- Median center the log2-data per metabolite 
+* Note that median centering here is by subtraction because the data is log2-transformed
+
+```{r}
+# heatmap in replicates
+centered.met.heatmap <- centered.met %>%
+  mutate(sample = factor(sample, levels = allsampleLevels)) %>%
+  select(featureName, sample, centered.log2.integral) %>%
+  spread(sample, centered.log2.integral) %>%
+  arrange(featureName)
+
+# heatmap in averages
+centered.met.heatmap.avg <- centered.met %>%
+  mutate(SampleAvg = factor(sampleAvg, levels = allsampleAvgLevels)) %>%
+  group_by(featureName, sampleAvg) %>%
+  summarise(Avg.centered.log2.integral = mean(centered.log2.integral, na.rm = TRUE)) %>%
+  select(featureName, sampleAvg, Avg.centered.log2.integral) %>%
+  spread(sampleAvg, Avg.centered.log2.integral) %>%
+  arrange(featureName)
+
+```
+
+
+## Part 7: Generate the heatmaps
+
+* Two heatmaps are made one for all the replicates and one for the average data.
+* heatmaps.2 requires that the data are arranged in a wide format. 
+
+```{r}
+
+# The arguments to spread():
+# - data: Data object
+# - key: Name of column containing the new column names
+# - value: Name of column containing values
+
+# To be used to keep the Sample order in tbl.heatmap based on dose
+sampleLevels <- mixedsort(levels(factor(tbl.norm.ratios$sample)))
+sampleAvgLevels <- mixedsort(levels(factor(tbl.norm.ratios$sampleAvg)))
+
+# data for heatmap of replicates
+tbl.heatmap <- tbl.norm.ratios %>%
+  mutate(sample = factor(sample, levels = sampleLevels)) %>%
+  select(featureName, sample, log2.Norm.ratios) %>%
+  spread(sample, log2.Norm.ratios)
+
+# data for heatmap of averages
+tbl.heatmap.avg <- tbl.norm.ratios %>%
+  mutate(sampleAvg = factor(sampleAvg, levels = sampleAvgLevels)) %>%
+  group_by(featureName, sampleAvg) %>%
+  summarise(Avg.log2.Norm.ratios = mean(log2.Norm.ratios, na.rm = TRUE)) %>%
+  select(featureName, sampleAvg, Avg.log2.Norm.ratios) %>%
+  spread(sampleAvg, Avg.log2.Norm.ratios)
+
+#This adds 0 values as a new column so the heatmap code works.
+#This is required if only 1 sampleClass is being analyzed. Comment otherwise.
+#tbl.heatmap.avg<-cbind(tbl.heatmap.avg,Control=rep(0,nrow(tbl.heatmap.avg)))
+
+```
+
+Prepare the heatmap of the data in replicates
+
+* Note: you might need to play with the heatmap dimensions to get it printed in a pretty format.
+* The heatmaps here are not clustered along any axis.
+
+```{r}
+
+#If Pathway intermediates, this will median center. Otherwise, it will normalize to reference.
+if(features=="Pathway_Intermediates")
+{
+  selected.heatmap<-centered.met.heatmap
+  print("Pathway Intermediates, Median-Centering")
+}else
+{
+  selected.heatmap<-tbl.heatmap
+  print("Normalizing to Reference")
+}
+
+# save the Metabolite data as a vector
+met <- selected.heatmap$featureName
+
+# convert the data to a matrix. Have to do that only for the numeric data
+# set the Metabolite names as row names of the matrix
+norm.data.matrix <- data.matrix(selected.heatmap[, 2:ncol(selected.heatmap)])
+rownames(norm.data.matrix) <- met
+
+# set the color palette
+heatmap.palette <- colorRampPalette(c("green", "black", "red"))(n = 300)
+
+# create a png for the heat map
+pdf(paste0("Heatmaps/",compiled.label, "_replicates_heatmap.pdf"),       
+    width = 7,
+    height = 7,
+    family = "Helvetica",
+    bg = "transparent",
+    pointsize = 12,
+    colormodel = "srgb")
+
+distance <- dist(norm.data.matrix, method = "euclidean")        #Defines the distance between rows of the matrix.
+cluster <- hclust(distance, method = "complete")   #Clusters based on the distance.
+
+norm.data.heatmap <- heatmap.2(norm.data.matrix,
+                               main = paste0(datePlot, "_", experiment, "_All replicates"),
+                               cex.main = 12,
+                               srtCol = 90,
+                               adjCol = c(0.5,0.5),
+                               offsetRow = 0.15,
+                               offsetCol = 6,
+                               breaks = unique(c(seq(-3,-1, by = 0.02), seq(-1,1, by = 0.02), seq(1,3, by = 0.02))),
+                               density.info = 'none',     # turns off density plot inside color legend
+                               trace = "none",          # turns off trace lines inside the heat map. Has to be stated
+                               margins = c(2,20),
+                               cexRow = 2,                # controls text size of row labels
+                               cexCol= 1,               # controls text size of column labels 
+                               col = heatmap.palette,    # use on color palette defined earlier 
+                               dendrogram="n",        # only draw a row dendrogram
+                               Rowv = FALSE, # apply default clustering method
+                               Colv = NA,                # apply default clustering method   
+                               key = TRUE,
+                               keysize = 0.1,
+                               key.xlab = "log2 ratio",
+                               key.title = NA,
+                               key.par = list(mgp = c(1.5, 0.5, 0),
+                                              mar = c(5, 25, 4, 8)),
+                               lmat = rbind(c(0,3), c(2,1), c(0,4)),
+                               lhei = c(0.5,3,1),
+                               lwid = c(0.02,0.25)
+)
+
+dev.off()
+
+```
+
+Prepare the heatmap of the average data
+### This works for the ACID standards.
+
+```{r}
+# save the Metabolite data as a vector
+met <- tbl.heatmap.avg$featureName
+
+# convert the data to a matrix. Have to do that only for the numeric data
+# set the Metabolite names as row names of the matrix
+norm.data.matrix <- data.matrix(tbl.heatmap.avg[, 2:ncol(tbl.heatmap.avg)])
+rownames(norm.data.matrix) <- met
+
+# set the color palette
+heatmap.palette <- colorRampPalette(c("green", "black", "red"))(n = 300)
+
+# create a png for the heat map
+pdf(paste0("Heatmaps/",compiled.label,"_averages_heatmap.pdf"),       
+    width = 7,
+    height = 7,
+    family = "Helvetica",
+    bg = "transparent",
+    pointsize = 12,
+    colormodel = "srgb")
+
+distance <- dist(norm.data.matrix, method = "euclidean")        #Defines the distance between rows of the matrix.
+cluster <- hclust(distance, method = "complete")   #Clusters based on the distance.
+
+norm.data.heatmap <- heatmap.2(norm.data.matrix,
+                               main = paste0(datePlot, "_", experiment, "_averages"),
+                               cex.main = 12,
+                               srtCol = 90,
+                               adjCol = c(0.5,0.5),
+                               offsetRow = 0.15,
+                               offsetCol = 6,
+                               breaks = unique(c(seq(-3,-1, by = 0.02), seq(-1,1, by = 0.02), seq(1,3, by = 0.02))),
+                               density.info = 'none',     # turns off density plot inside color legend
+                               trace = "none",          # turns off trace lines inside the heat map. Has to be stated
+                               margins = c(2,20),
+                               cexRow = 2,                # controls text size of row labels
+                               cexCol= 1,               # controls text size of column labels 
+                               col = heatmap.palette,    # use on color palette defined earlier 
+                               dendrogram="n",        # only draw a row dendrogram
+                               Rowv = FALSE, # apply default clustering method
+                               Colv = NA,                # apply default clustering method   
+                               key = TRUE,
+                               keysize = 0.1,
+                               key.xlab = "log2 ratio",
+                               key.title = NA,
+                               key.par = list(mgp = c(1.5, 0.5, 0),
+                                              mar = c(5, 25, 4, 8)),
+                               lmat = rbind(c(0,3), c(2,1), c(0,4)),
+                               lhei = c(0.5,3,1),
+                               lwid = c(0.02,0.25)
+)
+
+dev.off()
+
+```
+
+### This generates a heatmap with correct dimensions for Pathway Intermediates and IPRP Standards
+### It works for the averages of the replicates
+```{r}
+
+#If Pathway intermediates, this will median center. Otherwise, it will normalize to reference.
+if(features=="Pathway_Intermediates")
+{
+  selected.heatmap.avg<-centered.met.heatmap.avg
+  print("Pathway Intermediates, Median-Centering")
+}else
+{
+  selected.heatmap.avg<-tbl.heatmap.avg
+  print("Normalizing to Reference")
+}
+
+# save the Metabolite data as a vector
+met <- selected.heatmap.avg$featureName
+
+# convert the data to a matrix. Have to do that only for the numeric data
+# set the Metabolite names as row names of the matrix
+norm.data.matrix <- data.matrix(selected.heatmap.avg[, 2:ncol(selected.heatmap.avg)])
+rownames(norm.data.matrix) <- met
+
+# set the color palette
+heatmap.palette <- colorRampPalette(c("green", "black", "red"))(n = 300)
+
+
+pdf(paste0("Heatmaps/",compiled.label,"_averages_heatmap.pdf"),       
+    width = 20,
+    height = 40,
+    family = "Helvetica",
+    bg = "transparent",
+    pointsize = 10,
+    colormodel = "srgb")
+
+distance <- dist(norm.data.matrix, method = "euclidean")        #Defines the distance between rows of the matrix.
+cluster <- hclust(distance, method = "complete")   #Clusters based on the distance.
+
+
+norm.data.heatmap <- heatmap.2(norm.data.matrix,
+                               main = paste0(datePlot, "_", experiment, "_averages"),
+                               cex.main = 12,
+                               srtCol = 90,
+                               adjCol = c(0.5,0.5),
+                               offsetRow = 0.15,
+                               offsetCol = 6,
+                               breaks = unique(c(seq(-3,-1, by = 0.02), seq(-1,1, by = 0.02), seq(1,3, by = 0.02))),
+                               density.info = 'none',     # turns off density plot inside color legend
+                               trace = "none",          # turns off trace lines inside the heat map. Has to be stated
+                               margins = c(2,40),
+                               cexRow = 2,                # controls text size of row labels
+                               cexCol= 1,               # controls text size of column labels 
+                               col = heatmap.palette,    # use on color palette defined earlier 
+                               dendrogram="n",        # only draw a row dendrogram
+                               Rowv = F, # apply default clustering method
+                               Colv = NA,                # apply default clustering method   
+                               key = T,
+                               keysize = 0.1,
+                               key.xlab = "log2 ratio",
+                               key.title = NA,
+                               key.par = list(mgp = c(1.5, 0.5, 0),
+                                              mar = c(5, 120, 3, 4)),
+                               lmat = rbind(c(0,3), c(2,1), c(0,4)),
+                               lhei = c(1,60,2),
+                               lwid = c(1,12)
+)
+dev.off()
+
+```
+
+#Code for saving RData
+```{r}
+if(features=="Pathway_Intermediates")
+{
+  tbl.heatmap.avg<-centered.met.heatmap.avg
+}
+write.table(tbl.heatmap.avg,paste0("Heatmap.Data/",compiled.label,"Heatmap.Data.csv"),sep=",",row.names=F,col.names=T)
+save.image(paste0("RData/",compiled.label,".RData"))
+
+```
